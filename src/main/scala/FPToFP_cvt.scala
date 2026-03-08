@@ -13,6 +13,7 @@ class FPToFP_cvt(ctrlGen: Data = EmptyFPUCtrl())
   val isFP32ToFP16 = io.in.bits.op === "b001".U
   val isBF16ToFP32 = io.in.bits.op === "b010".U
   val isFP32ToBF16 = io.in.bits.op === "b011".U
+  val s1Op = S1Reg(io.in.bits.op)
 
   val fp16ToFp32 = Module(new FPToFP(5, 11, 8, 24))
   val fp32ToFp16 = Module(new FPToFP(8, 24, 5, 11))
@@ -61,16 +62,16 @@ class FPToFP_cvt(ctrlGen: Data = EmptyFPUCtrl())
   )
 
   io.out.bits.result := MuxCase(0.U(32.W), Seq(
-    isFP16ToFP32 -> S1Reg(fp16ToFp32.io.result),
-    isFP32ToFP16 -> S1Reg(fp32ToFp16.io.result),
-    isBF16ToFP32 -> S1Reg(bf16ToFp32Result),
-    isFP32ToBF16 -> S1Reg(fp32ToBf16Result)
+    (s1Op === "b000".U) -> S1Reg(fp16ToFp32.io.result),
+    (s1Op === "b001".U) -> S1Reg(fp32ToFp16.io.result),
+    (s1Op === "b010".U) -> S1Reg(bf16ToFp32Result),
+    (s1Op === "b011".U) -> S1Reg(fp32ToBf16Result)
   ))
   io.out.bits.fflags := MuxCase(0.U(5.W), Seq(
-    isFP16ToFP32 -> S1Reg(fp16ToFp32.io.fflags),
-    isFP32ToFP16 -> S1Reg(fp32ToFp16.io.fflags),
-    isBF16ToFP32 -> S1Reg(bf16ToFp32Flags),
-    isFP32ToBF16 -> S1Reg(fp32ToBf16Flags)
+    (s1Op === "b000".U) -> S1Reg(fp16ToFp32.io.fflags),
+    (s1Op === "b001".U) -> S1Reg(fp32ToFp16.io.fflags),
+    (s1Op === "b010".U) -> S1Reg(bf16ToFp32Flags),
+    (s1Op === "b011".U) -> S1Reg(fp32ToBf16Flags)
   ))
   io.out.bits.ctrl.foreach(_ := S1Reg(io.in.bits.ctrl.get))
 }
