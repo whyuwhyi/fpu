@@ -43,6 +43,7 @@ class FMATest extends AnyFlatSpec with ChiselScalatestTester {
       d.io.out.initSink()
       d.io.out.setSinkClock(d.clock)
       d.clock.setTimeout(20)
+      d.packedMode.poke(false.B)
       d.io.out.ready.poke(true.B)
       fork{
         d.io.in.enqueueSeq(Seq(

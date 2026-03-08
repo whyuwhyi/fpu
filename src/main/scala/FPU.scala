@@ -12,37 +12,91 @@ class ScalarFPU(expWidth: Int, precision: Int, ctrlGen: Data = EmptyFPUCtrl()) e
     val out = DecoupledIO(new FPUOutput(64, ctrlGen))
     val select = Output(UInt(3.W))
   })
-  val subModules = Array[FPUSubModule](
-    Module(new FMA(expWidth, precision, ctrlGen)),
-    Module(new FCMP(expWidth, precision, ctrlGen)),
-    Module(new FPMV(expWidth, precision, ctrlGen)),
-    Module(new FPToInt(ctrlGen)),
-    Module(new IntToFP(ctrlGen)),
-    Module(new FPToFP_cvt(ctrlGen))
+  val fmaModule = Module(new FMA(expWidth, precision, ctrlGen, useExternalSharedMul = true))
+  val cmpModule = Module(new FCMP(expWidth, precision, ctrlGen))
+  val mvModule = Module(new FPMV(expWidth, precision, ctrlGen))
+  val fpToIntModule = Module(new FPToInt(ctrlGen))
+  val intToFpModule = Module(new IntToFP(ctrlGen))
+  val cvtModule = Module(new FPToFP_cvt(ctrlGen))
+  val vecCvtModule = Module(new FPToFP_cvt(ctrlGen))
+  val subModules = Seq[FPUSubModule](
+    fmaModule,
+    cmpModule,
+    mvModule,
+    fpToIntModule,
+    intToFpModule,
+    cvtModule,
+    vecCvtModule
   )
 
-  val fu = io.in.bits.op.head(3)
-  for((module, idx) <- subModules.zipWithIndex){
-    module.io.in.bits.op := Mux(idx.U===fu, io.in.bits.op(2, 0), 0.U(3.W))
-    module.io.in.bits.rm := Mux(idx.U===fu, io.in.bits.rm, 0.U(3.W))
-    module.io.in.bits.a := Mux(idx.U===fu, io.in.bits.a, 0.U(len.W))
-    module.io.in.bits.b := Mux(idx.U===fu, io.in.bits.b, 0.U(len.W))
-    module.io.in.bits.c := Mux(idx.U===fu, io.in.bits.c, 0.U(len.W))
-    module.io.in.bits.ctrl.foreach( _ := Mux(idx.U===fu, io.in.bits.ctrl.get, 0.U.asTypeOf(io.in.bits.ctrl.get)) )
-    module.io.in.valid := idx.U===fu && io.in.valid
+  val extOp = io.in.bits.op
+  val packedOp = CustomLaneOps.isPacked(extOp)
+  val vecCvtOp = CustomLaneOps.isVectorConvert(extOp)
+  val fu = Mux(packedOp, 6.U(3.W), Mux(vecCvtOp, 7.U(3.W), extOp.head(3)))
+  val localFmaOp = Mux(packedOp, CustomLaneOps.packedSubOp(extOp), extOp(2, 0))
+  val localVecCvtOp = Mux(vecCvtOp, CustomLaneOps.cvtSubOp(extOp), extOp(2, 0))
+  val toFma = fu === 0.U || fu === 6.U
+  fmaModule.packedMode := packedOp
+
+  val sharedMul = Module(new DualSlicedMantissaMul(Seq(1)))
+  sharedMul.io.a0 := fmaModule.sharedMul.a0
+  sharedMul.io.b0 := fmaModule.sharedMul.b0
+  sharedMul.io.a1 := fmaModule.sharedMul.a1
+  sharedMul.io.b1 := fmaModule.sharedMul.b1
+  sharedMul.io.regEnables(0) := fmaModule.sharedMul.en
+  fmaModule.sharedMul.prod0 := sharedMul.io.prod0
+  fmaModule.sharedMul.prod1 := sharedMul.io.prod1
+
+  fmaModule.io.in.bits.op := Mux(toFma, localFmaOp, 0.U(3.W))
+  fmaModule.io.in.bits.rm := Mux(toFma, io.in.bits.rm, 0.U(3.W))
+  fmaModule.io.in.bits.a := Mux(toFma, io.in.bits.a, 0.U(len.W))
+  fmaModule.io.in.bits.b := Mux(toFma, io.in.bits.b, 0.U(len.W))
+  fmaModule.io.in.bits.c := Mux(toFma, io.in.bits.c, 0.U(len.W))
+  fmaModule.io.in.bits.ctrl.foreach(_ := Mux(toFma, io.in.bits.ctrl.get, 0.U.asTypeOf(io.in.bits.ctrl.get)))
+  fmaModule.io.in.valid := toFma && io.in.valid
+
+  val routedModules = Seq(
+    (1.U, cmpModule),
+    (2.U, mvModule),
+    (3.U, fpToIntModule),
+    (4.U, intToFpModule),
+    (5.U, cvtModule),
+    (7.U, vecCvtModule)
+  )
+  routedModules.foreach { case (tag, module) =>
+    module.io.in.bits.op := Mux(fu === tag, Mux(tag === 7.U, localVecCvtOp, extOp(2, 0)), 0.U(3.W))
+    module.io.in.bits.rm := Mux(fu === tag, io.in.bits.rm, 0.U(3.W))
+    module.io.in.bits.a := Mux(fu === tag, io.in.bits.a, 0.U(len.W))
+    module.io.in.bits.b := Mux(fu === tag, io.in.bits.b, 0.U(len.W))
+    module.io.in.bits.c := Mux(fu === tag, io.in.bits.c, 0.U(len.W))
+    module.io.in.bits.ctrl.foreach(_ := Mux(fu === tag, io.in.bits.ctrl.get, 0.U.asTypeOf(io.in.bits.ctrl.get)))
+    module.io.in.valid := fu === tag && io.in.valid
   }
-  io.in.ready := MuxLookup(fu, false.B)(
-    subModules.zipWithIndex.map{ case (module, idx) =>
-      idx.U -> module.io.in.ready
-    }
-  )
+  io.in.ready := MuxLookup(fu, false.B)(Seq(
+    0.U -> fmaModule.io.in.ready,
+    1.U -> cmpModule.io.in.ready,
+    2.U -> mvModule.io.in.ready,
+    3.U -> fpToIntModule.io.in.ready,
+    4.U -> intToFpModule.io.in.ready,
+    5.U -> cvtModule.io.in.ready,
+    6.U -> fmaModule.io.in.ready,
+    7.U -> vecCvtModule.io.in.ready
+  ))
 
-  val outArbiter = Module(new Arbiter(new FPUOutput(64, ctrlGen), 6))
+  val outArbiter = Module(new Arbiter(new FPUOutput(64, ctrlGen), subModules.length))
   subModules.zipWithIndex.foreach{ case (module, idx) =>
     outArbiter.io.in(idx) <> module.io.out
   }
   io.out <> outArbiter.io.out
-  io.select := outArbiter.io.chosen
+  io.select := MuxLookup(outArbiter.io.chosen, 0.U(3.W))(Seq(
+    0.U -> 0.U(3.W),
+    1.U -> 1.U(3.W),
+    2.U -> 2.U(3.W),
+    3.U -> 3.U(3.W),
+    4.U -> 4.U(3.W),
+    5.U -> 5.U(3.W),
+    6.U -> 7.U(3.W)
+  ))
 }
 
 class VectorFPU[T <: TestFPUCtrl](expWidth: Int, precision: Int, softThread: Int = 32, hardThread: Int = 32, ctrlGen:T)

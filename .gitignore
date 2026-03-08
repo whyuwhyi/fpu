@@ -9,3 +9,6 @@ project
 target
 test_run_dir
 build
+*.anno.json
+*.fir
+*.sv
